@@ -828,6 +828,17 @@ def load_profiles():
         pass  # Keep using the last valid profiles
     return profiles
 
+# "Check now" (tray menu / log window) sets this to end the current wait early
+check_now_event = threading.Event()
+
+def check_now(*_):
+    add_to_log("Checking now...")
+    check_now_event.set()
+
+# Sleep for the given seconds, or until "Check now" is clicked
+def wait_or_check_now(seconds):
+    return check_now_event.wait(seconds)
+
 # Sleep for the given seconds, but check the connected networks every few seconds and return early
 # if they changed (e.g. switching between Ethernet and Wi-Fi), so the new network is handled right away (auto mode)
 NETWORK_POLL_SECONDS = 5
@@ -837,7 +848,8 @@ def wait_or_network_change(seconds, networks):
         remaining = deadline - time.time()
         if remaining <= 0:
             return False
-        time.sleep(min(NETWORK_POLL_SECONDS, remaining))
+        if check_now_event.wait(min(NETWORK_POLL_SECONDS, remaining)):
+            return True  # "Check now" was clicked
         ethernet_connected, wifi_ssid, _ = get_connected_networks()
         if (ethernet_connected, wifi_ssid) != tuple(networks):
             add_to_log("Network change detected. Checking again now...")
@@ -926,6 +938,21 @@ def show_log_dialog():
             # Create label for successful logins count
             successful_logins_label = tk.Label(log_dialog, text=f"Successful Logins: {successful_logins_count}", anchor="w", padx=5)
             successful_logins_label.place(x=0, rely=1.0, anchor=tk.SW, bordermode=tk.OUTSIDE)
+            # Create the "Check Now" button, to skip the current wait
+            check_now_button = tk.Button(
+                log_dialog,
+                text="Check Now",
+                command=check_now,
+                padx=5,
+                pady=0,
+                fg="white",
+                bg="#08872a",
+                activebackground="#076921",
+                activeforeground="white",
+                relief=tk.RAISED,
+                borderwidth=2,
+            )
+            check_now_button.place(relx=1.0, rely=1.0, x=-20, y=-2, anchor=tk.SE)  # Left of the scrollbar area
             # Define tags for different styles
             log_text.tag_configure("green", foreground="green")
             log_text.tag_configure("red", foreground="red")
@@ -1062,6 +1089,7 @@ def create_system_tray_icon():
     image = Image.open("icon.ico")
     menu = pystray.Menu(
         pystray.MenuItem('Show Log', show_log_dialog, default=True),
+        pystray.MenuItem('Check Now', check_now),
         pystray.MenuItem('Exit', exit_application)
     )
     icon = pystray.Icon("my_icon", image, "HotspotAutoLogin", menu)
@@ -1080,6 +1108,7 @@ def check_network_status():
     global running, errorcount, sleepcount, connected_ssid_lower, ssid, response, request_success, request_errorcount, successful_logins_count, last_auto_message, last_session_message, selected_profile
     # In auto mode the program keeps running (e.g. started with Windows), so it never exits on errors
     while running and (auto_mode or errorcount < 10):
+        check_now_event.clear()
         if auto_mode:
             if errorcount >= 10:
                 sleepcount = 300
@@ -1313,7 +1342,7 @@ def check_network_status():
         if auto_mode:
             wait_or_network_change(sleepcount, (ethernet_connected, wifi_ssid))
         else:
-            time.sleep(sleepcount)  # Sleep ... seconds before trying again
+            wait_or_check_now(sleepcount)  # Sleep ... seconds before trying again
     message = "Maximum error count reached. Exiting in 5 seconds..."
     add_to_log(message, "bold_red")
     save_to_file(message)

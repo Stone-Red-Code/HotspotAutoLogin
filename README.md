@@ -38,6 +38,7 @@ HotspotAutoLogin is a script that designed to automate the login process for Wi-
 ## `Usage`
 - Edit the config.json file with your specific information, including your login credentials, the portal URL, the SSID of the network you want to connect to, and the check interval in seconds. [Click to learn how to Configure the config.json](#how-to-configure-the-configjson)
 - When you run the script, a system tray icon will appear. Right-click on the icon to access options like showing the log or exiting the application.
+- To check the connection right away instead of waiting for the next check, click **Check Now** in the tray menu or in the log window. If the internet is down, it logs in immediately.
 - You can view the log of the script's actions by clicking the "Show Log" option in the system tray menu.
 
 ## `How to Configure the config.json?`
