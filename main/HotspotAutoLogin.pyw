@@ -1,5 +1,8 @@
 import json
 import os
+import sys
+import argparse
+import winreg
 import requests
 import time
 import subprocess
@@ -21,16 +24,65 @@ dns.resolver.default_resolver = dns.resolver.Resolver()
 from urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
-################################# REMOVE THIS BEFORE USING PYINSTALLER #################################
-# Change the current working directory to the script's directory
-script_dir = os.path.dirname(os.path.abspath(__file__))
+# Change the current working directory to the program's directory.
+# Works for both the script and a PyInstaller build, and is required when launched at Windows startup,
+# where the working directory is not the program folder (so config.json and icon.ico would not be found).
+if getattr(sys, "frozen", False):
+    script_dir = os.path.dirname(sys.executable)
+else:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
-################################# REMOVE THIS BEFORE USING PYINSTALLER #################################
 
 # Program Information
 program_name = "HotspotAutoLogin"
 version = "v1.90"
 github_link = "https://github.com/denizsafak/HotspotAutoLogin"
+
+# Command line arguments
+#   --auto        Skip profile selection and auto-detect which profile to use from the connected network
+#   --background  Don't open the log window at startup (used when starting with Windows)
+arg_parser = argparse.ArgumentParser(add_help=False)
+arg_parser.add_argument("--auto", action="store_true")
+arg_parser.add_argument("--background", action="store_true")
+args, _ = arg_parser.parse_known_args()
+auto_mode = args.auto
+
+# Start with Windows (HKCU Run key, no admin rights needed)
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+def get_autostart_command():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --auto --background'
+    # Use pythonw.exe so no console window is shown at startup
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if not os.path.exists(pythonw):
+        pythonw = sys.executable
+    return f'"{pythonw}" "{os.path.abspath(__file__)}" --auto --background'
+
+def is_autostart_enabled():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
+            winreg.QueryValueEx(key, program_name)
+            return True
+    except OSError:
+        return False
+
+def set_autostart(enabled):
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        if enabled:
+            winreg.SetValueEx(key, program_name, 0, winreg.REG_SZ, get_autostart_command())
+        else:
+            try:
+                winreg.DeleteValue(key, program_name)
+            except FileNotFoundError:
+                pass
+
+# If autostart is enabled, keep the registered path up to date in case the program folder was moved
+if is_autostart_enabled():
+    try:
+        set_autostart(True)
+    except OSError:
+        pass
 
 # Function to center a window on the screen
 def center_window(window, width, height):
@@ -40,7 +92,7 @@ def center_window(window, width, height):
     y = (screen_height - height) // 2
     window.geometry(f"{width}x{height}+{x}+{y}")
 
-def run_profile():
+def run_profile(event=None):
     global selected_profile
     refresh_profile_details()
     selected_index = listbox.curselection()
@@ -48,6 +100,24 @@ def run_profile():
         selected_index = int(selected_index[0])
         selected_profile = profiles[selected_index]
         root.destroy()
+
+# Run in auto mode: the profile is picked automatically based on the connected network
+def run_auto():
+    global auto_mode, selected_profile
+    refresh_profile_details()
+    if not profiles:
+        messagebox.showerror("No Profiles", "Add at least one profile before using Auto mode.")
+        return
+    auto_mode = True
+    selected_profile = None
+    root.destroy()
+
+def toggle_autostart():
+    try:
+        set_autostart(autostart_var.get())
+    except OSError as e:
+        autostart_var.set(is_autostart_enabled())
+        messagebox.showerror("Start with Windows", f"Could not change the startup setting: {e}")
 
 # Define a function to update the profile details
 def update_profile_details(event):
@@ -107,6 +177,8 @@ with open("config.json", "r") as f:
 profiles = config.get("profiles", [])
 # Create the main window
 root = tk.Tk()
+if auto_mode:
+    root.withdraw()  # Started with --auto, the profile selection window is not needed
 root.title(f"Profile Selection - {program_name} {version}")
 root.iconbitmap("icon.ico")
 # Set a maximum size for the window
@@ -552,6 +624,16 @@ github_button = tk.Button(
 )
 github_button.pack(side=tk.RIGHT, padx=(0, 5))
 
+# Create the "Start with Windows" checkbox (starts in Auto mode in the background)
+autostart_var = tk.BooleanVar(value=is_autostart_enabled())
+autostart_check = tk.Checkbutton(
+    profile_name_frame,
+    text="Start with Windows (Auto)",
+    variable=autostart_var,
+    command=toggle_autostart,
+)
+autostart_check.pack(side=tk.RIGHT, padx=(0, 5))
+
 # Create the "Config" button
 config_button = tk.Button(
     details_frame,
@@ -567,6 +649,22 @@ config_button = tk.Button(
     borderwidth=2,
 )
 config_button.pack(side=tk.LEFT, fill="x", padx=(0, 2), pady=(10, 0), expand=False)
+
+# Create the "Auto" button (detects the profile from the connected network)
+auto_button = tk.Button(
+    details_frame,
+    text="Auto",
+    command=run_auto,
+    padx=30,
+    pady=10,
+    fg="white",
+    bg="lightskyblue4",
+    activebackground="lightsteelblue4",
+    activeforeground="white",
+    relief=tk.RAISED,
+    borderwidth=2,
+)
+auto_button.pack(side=tk.LEFT, fill="x", padx=2, pady=(10, 0), expand=False)
 
 # Create the "Run" button
 run_button = tk.Button(
@@ -595,24 +693,34 @@ if profiles:
     listbox.select_set(0)  # Highlight the first item in the list
     update_profile_details(None)  # Update the profile details
 
-root.mainloop()
+if auto_mode:
+    root.destroy()
+else:
+    root.mainloop()
+
+# Load the given profile's data into the variables used by the network checker
+def apply_profile(profile):
+    global selected_profile, payload, url, internet_check_url, ssid, check_every_second, dialog_geometry, headers, expected_ssid, expected_ssid_lower
+    selected_profile = profile
+    payload = profile.get('payload')
+    url = profile.get('url', "")
+    internet_check_url = profile.get('internet_check_url', "")
+    ssid = profile.get('ssid', "") or "Ethernet"
+    check_every_second = profile.get('check_every_second', 600)
+    dialog_geometry = profile.get('dialog_geometry', {"width": 1024, "height": 500})
+    headers = profile.get('headers', "")
+    expected_ssid = ssid
+    expected_ssid_lower = expected_ssid.lower()
 
 # Access the selected profile's data after the window closes
-if selected_profile:
-    payload = selected_profile.get('payload')
-    url = selected_profile.get('url', "")
-    internet_check_url = selected_profile.get('internet_check_url', "")
-    ssid = selected_profile.get('ssid', "")
-    check_every_second = selected_profile.get('check_every_second', "")
-    dialog_geometry = selected_profile.get('dialog_geometry', "")
-    headers = selected_profile.get('headers', "")
-    if ssid:
-        expected_ssid = ssid
-        expected_ssid_lower = expected_ssid.lower()
-    else:
-        ssid = "Ethernet"
-        expected_ssid = ssid
-        expected_ssid_lower = expected_ssid.lower()
+if auto_mode:
+    # The profile is chosen later, based on the connected network
+    selected_profile = None
+    expected_ssid = expected_ssid_lower = None
+    check_every_second = 600
+    dialog_geometry = profiles[0].get('dialog_geometry', {"width": 1024, "height": 500}) if profiles else {"width": 1024, "height": 500}
+elif selected_profile:
+    apply_profile(selected_profile)
 
 # Function to send the request
 def send_request():
@@ -641,35 +749,96 @@ def is_internet_available():
     except Exception as e:
         return False
     
+# Function to get all currently connected networks (for Windows)
+# Returns (ethernet_connected, wifi_ssid, wifi_error)
+def get_connected_networks():
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    ethernet_connected = False
+    try:
+        ethernet_output = subprocess.check_output(["netsh", "interface", "show", "interface"], startupinfo=startupinfo).decode("utf-8", errors="replace")
+        for line in ethernet_output.splitlines():
+            # Columns: Admin State, State, Type, Interface Name
+            parts = line.split(None, 3)
+            if len(parts) == 4 and parts[1] == "Connected" and "Ethernet" in parts[3] and not parts[3].startswith("vEthernet"):
+                ethernet_connected = True  # vEthernet adapters (Hyper-V / WSL) are virtual and always "Connected"
+                break
+    except subprocess.CalledProcessError:
+        pass
+    wifi_ssid = None
+    wifi_error = None
+    try:
+        wifi_output = subprocess.check_output(["netsh", "wlan", "show", "interfaces"], startupinfo=startupinfo).decode("utf-8", errors="replace")
+        match = re.search(r"^\s*SSID\s*:\s*(.+)$", wifi_output, re.MULTILINE)
+        if match:
+            wifi_ssid = match.group(1).strip()
+    except subprocess.CalledProcessError as e:
+        wifi_error = str(e)
+    return ethernet_connected, wifi_ssid, wifi_error
+
 # Function to get the currently connected SSID using system commands (for Windows)
 def get_connected_network():
-    try:
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        # Check if connected to Ethernet
-        ethernet_output = subprocess.check_output(["netsh", "interface", "show", "interface"], startupinfo=startupinfo).decode("utf-8")
-        ethernet_lines = ethernet_output.split("\n")
-        for line in ethernet_lines:
-            if "Connected" in line:
-                if "Ethernet" in line:
-                    return "Ethernet"
-        # If not connected to Ethernet, check Wi-Fi SSID
-        try:
-            wifi_output = subprocess.check_output(["netsh", "wlan", "show", "interfaces"], startupinfo=startupinfo).decode("utf-8")
-            wifi_lines = wifi_output.split("\n")
-            wifi_ssid = None
-            for line in wifi_lines:
-                if "SSID" in line:
-                    wifi_ssid = line.strip().split(": ")[1]
-                    break
-            if wifi_ssid is not None:
-                return wifi_ssid
-            else:
-                return False
-        except subprocess.CalledProcessError as e:
-            return "Error: " + str(e)
-    except subprocess.CalledProcessError:
+    ethernet_connected, wifi_ssid, wifi_error = get_connected_networks()
+    if ethernet_connected:
+        return "Ethernet"
+    if wifi_error:
+        return "Error: " + wifi_error
+    return wifi_ssid or False
+
+# Check whether the login portal's host can be reached from the current network
+def is_portal_reachable(portal_url, timeout=3):
+    parsed = urlparse(portal_url)
+    if not parsed.hostname:
         return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((parsed.hostname, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+# Reload profiles from config.json, so edits are picked up without restarting (auto mode)
+def load_profiles():
+    global profiles
+    try:
+        with open("config.json", "r") as f:
+            profiles = json.load(f).get("profiles", [])
+    except (OSError, json.JSONDecodeError):
+        pass  # Keep using the last valid profiles
+    return profiles
+
+# Sleep for the given seconds, but check the connected networks every few seconds and return early
+# if they changed (e.g. switching between Ethernet and Wi-Fi), so the new network is handled right away (auto mode)
+NETWORK_POLL_SECONDS = 5
+def wait_or_network_change(seconds, networks):
+    deadline = time.time() + seconds
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return False
+        time.sleep(min(NETWORK_POLL_SECONDS, remaining))
+        ethernet_connected, wifi_ssid, _ = get_connected_networks()
+        if (ethernet_connected, wifi_ssid) != tuple(networks):
+            add_to_log("Network change detected. Checking again now...")
+            return True
+
+# Find the profile that belongs to the currently connected network (auto mode)
+# Returns (profile, connected_network_name) or (None, None)
+def find_matching_profile(ethernet_connected, wifi_ssid):
+    # Wi-Fi: match by SSID. If several profiles share the SSID, prefer one whose portal is reachable.
+    if wifi_ssid:
+        candidates = [p for p in profiles if p.get('ssid', "").strip().lower() == wifi_ssid.lower()]
+        if len(candidates) > 1:
+            reachable = [p for p in candidates if is_portal_reachable(p.get('url', ""))]
+            candidates = reachable or candidates
+        if candidates:
+            return candidates[0], wifi_ssid
+    # Ethernet: profiles have no SSID, so use the one whose login portal is reachable on this network
+    if ethernet_connected:
+        for p in profiles:
+            if not p.get('ssid') and is_portal_reachable(p.get('url', "")):
+                return p, "Ethernet"
+    return None, None
     
 # Is connected to wifi
 def is_connected_to_wifi():
@@ -708,18 +877,25 @@ def update_window_geometry(event):
     x, y = event.x, event.y
     width, height = event.width, event.height
 
+# Title of the log dialog, with the profile currently in use
+def get_log_title():
+    if auto_mode:
+        name = selected_profile['name'] if selected_profile else "waiting for a known network"
+        return f"Log Messages (Auto: {name})"
+    return f"Log Messages ({selected_profile['name']})"
+
 # Function to show the log dialog with the currently selected profile name
 def show_log_dialog():
     global log_dialog, log_text, log_dialog_open, successful_logins_label
     if not log_dialog_open:
         log_dialog_open = True
         if log_dialog:
-            log_dialog.title(f"Log Messages ({selected_profile['name']})")  # Update title with profile name
+            log_dialog.title(get_log_title())  # Update title with profile name
             log_dialog.deiconify()
             update_log()
         else:
             log_dialog = tk.Tk()
-            log_dialog.title(f"Log Messages ({selected_profile['name']})")  # Update title with profile name
+            log_dialog.title(get_log_title())  # Update title with profile name
             log_text = tk.Text(log_dialog)
             log_frame = tk.Frame(log_dialog)
             log_frame.pack(fill=tk.BOTH, expand=True)
@@ -778,6 +954,8 @@ def add_to_log(message, style=None):
 # Function to update the log
 def update_log():
     if log_text:
+        if auto_mode and log_dialog:
+            log_dialog.title(get_log_title())  # The profile can change in auto mode
         log_text.delete(1.0, tk.END)
         for message, style in get_last_log_messages():
             if style:
@@ -820,10 +998,53 @@ request_success = False
 request_errorcount = 0
 sleepcount = check_every_second
 connected_ssid_lower = None
+last_auto_message = None
 def check_network_status():
-    global running, errorcount, sleepcount, connected_ssid_lower, ssid, response, request_success, request_errorcount, successful_logins_count
-    while running and errorcount < 10:
-        connected_ssid = get_connected_network()
+    global running, errorcount, sleepcount, connected_ssid_lower, ssid, response, request_success, request_errorcount, successful_logins_count, last_auto_message, selected_profile
+    # In auto mode the program keeps running (e.g. started with Windows), so it never exits on errors
+    while running and (auto_mode or errorcount < 10):
+        if auto_mode:
+            if errorcount >= 10:
+                sleepcount = 300
+                message = "Too many errors. Pausing for {} seconds before trying again...".format(str(sleepcount))
+                add_to_log(message, "bold_red")
+                save_to_file(message)
+                errorcount = 0
+                time.sleep(sleepcount)
+                continue
+            # Detect which profile belongs to the connected network
+            load_profiles()
+            ethernet_connected, wifi_ssid, wifi_error = get_connected_networks()
+            detected_profile, connected_ssid = find_matching_profile(ethernet_connected, wifi_ssid)
+            if detected_profile is None:
+                sleepcount = 30
+                if wifi_error and not ethernet_connected:
+                    message = "{}\nFailed to get SSID. If location services are disabled, please enable them. Checking again in {} seconds...".format(wifi_error, str(sleepcount))
+                elif wifi_ssid or ethernet_connected:
+                    network = " and ".join(n for n in [wifi_ssid, "Ethernet" if ethernet_connected else None] if n)
+                    message = "Connected to {}, which does not match any profile. Waiting for a known network...".format(network)
+                else:
+                    message = "Not connected to any network. Waiting for a known network..."
+                # Only log when the situation changes, so the log isn't flooded while idle
+                if message != last_auto_message:
+                    add_to_log(message, "red" if wifi_error else None)
+                    last_auto_message = message
+                selected_profile = None  # So the next known network is logged as a new detection
+                wait_or_network_change(sleepcount, (ethernet_connected, wifi_ssid))
+                continue
+            last_auto_message = None
+            if selected_profile is None or selected_profile.get('name') != detected_profile.get('name'):
+                errorcount = 0
+                request_success = False
+                request_errorcount = 0
+                apply_profile(detected_profile)
+                message = "Detected network {}. Using profile '{}'.".format(connected_ssid, detected_profile.get('name'))
+                add_to_log(message, "bold_green")
+                save_to_file(message)
+            else:
+                apply_profile(detected_profile)  # Pick up config.json edits
+        else:
+            connected_ssid = get_connected_network()
         if isinstance(connected_ssid, str) and "error" in connected_ssid.lower():
             sleepcount = 60
             message = "{}\nFailed to get SSID. If location services are disabled, please enable them. Retrying in {} seconds...".format(connected_ssid, str(sleepcount))
@@ -834,7 +1055,8 @@ def check_network_status():
         if (connected_ssid):
             connected_ssid_lower = connected_ssid.lower()
         if (connected_ssid) and ((connected_ssid_lower == expected_ssid_lower)):
-            if is_connected_to_wifi() and (connected_ssid == "Ethernet" and expected_ssid == "Ethernet"):
+            # Not in auto mode: there, Wi-Fi may be a separate network the user wants to keep
+            if not auto_mode and is_connected_to_wifi() and (connected_ssid == "Ethernet" and expected_ssid == "Ethernet"):
                 message = "You are both connected to Wi-Fi and Ethernet. Disconnecting from Wi-Fi and continuing with Ethernet..."
                 add_to_log(message)
                 startupinfo = subprocess.STARTUPINFO()
@@ -1000,7 +1222,10 @@ def check_network_status():
                 message = "Something went wrong. Please check your Wi-Fi or Ethernet connection. Checking again in {} seconds... (Errors: {}/10)".format(str(sleepcount), errorcount)
                 save_to_file(message)
                 add_to_log(message, "red")
-        time.sleep(sleepcount)  # Sleep ... seconds before trying again
+        if auto_mode:
+            wait_or_network_change(sleepcount, (ethernet_connected, wifi_ssid))
+        else:
+            time.sleep(sleepcount)  # Sleep ... seconds before trying again
     message = "Maximum error count reached. Exiting in 5 seconds..."
     add_to_log(message, "bold_red")
     save_to_file(message)
@@ -1012,9 +1237,10 @@ if __name__ == '__main__':
     # Create a thread for the system tray icon
     tray_thread = threading.Thread(target=create_system_tray_icon)
     tray_thread.start()
-    # Open Log Messages at startup
-    open_log_messages_startup = threading.Thread(target=show_log_dialog)
-    open_log_messages_startup.start()
+    # Open Log Messages at startup (unless started in the background, e.g. with Windows)
+    if not args.background:
+        open_log_messages_startup = threading.Thread(target=show_log_dialog)
+        open_log_messages_startup.start()
     # Start the network status checking in the main thread
     check_network_status()
     # Wait for all threads to finish

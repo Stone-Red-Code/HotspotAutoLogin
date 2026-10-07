@@ -26,6 +26,15 @@ HotspotAutoLogin is a script that designed to automate the login process for Wi-
 - Any important events or actions taken by the script are logged both in a log file (log.txt) and in the log window that can be accessed via the system tray icon.
 - The script reads its configuration from a config.json file. This file contains the necessary information, such as your login credentials, the URL of the authentication portal, the SSID (network name) to which you want to connect, and the frequency of network checks in seconds.
 
+## `Auto Mode & Start with Windows`
+- **Auto mode:** Click the **Auto** button in the profile selection window (or run with `--auto`). Instead of using a single profile, the program looks at the network you are actually connected to and picks the matching profile automatically:
+  - **Wi-Fi:** the profile whose `ssid` matches the connected Wi-Fi (case-insensitive).
+  - **Ethernet:** profiles without an `ssid` are Ethernet profiles. The one whose login `url` is reachable on the current network is used.
+  - If the connected network doesn't match any profile, nothing is sent and the program just waits for a known network. It never forces a connection to another network in this mode.
+  - `config.json` is re-read on every check, so edits apply without restarting.
+- **Start with Windows:** Tick **Start with Windows (Auto)** in the profile selection window. The program will then start at sign-in in Auto mode, in the background (tray icon only). Untick it to disable. This uses the current user's `Run` registry key, so no admin rights are needed.
+- Command line flags: `--auto` (skip profile selection, use Auto mode) and `--background` (don't open the log window at startup). E.g. `run.bat --auto`.
+
 ## `Usage`
 - Edit the config.json file with your specific information, including your login credentials, the portal URL, the SSID of the network you want to connect to, and the check interval in seconds. [Click to learn how to Configure the config.json](#how-to-configure-the-configjson)
 - When you run the script, a system tray icon will appear. Right-click on the icon to access options like showing the log or exiting the application.
