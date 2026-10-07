@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from tkinter import Text, Scrollbar
 from PIL import Image
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 import dns.resolver
 dns.resolver.override_system_resolver(dns.resolver.Resolver())
 dns.resolver.default_resolver = dns.resolver.Resolver()
@@ -305,6 +305,17 @@ def add_new_profile():
         if not dialog_height:
             error_message("dialog_height cannot be empty.")
             return
+        session_hours = session_hours_var.get().strip()
+        if session_hours:
+            try:
+                session_hours = float(session_hours)
+                if session_hours <= 0:
+                    raise ValueError
+            except ValueError:
+                error_message("session_hours must be a positive number (or empty).")
+                return
+            if session_hours.is_integer():
+                session_hours = int(session_hours)
 
         try:
             parsed_headers = json.loads(raw_headers)
@@ -332,6 +343,8 @@ def add_new_profile():
             "check_every_second": int(check_every_second),
             "dialog_geometry": {"width": int(dialog_width), "height": int(dialog_height)}
         }
+        if session_hours:
+            new_profile["session_hours"] = session_hours
         if not use_ethernet_var.get():
             new_profile["ssid"] = ssid
         profiles.append(new_profile)
@@ -369,6 +382,7 @@ def add_new_profile():
     url_var = tk.StringVar()
     internet_check_url_var = tk.StringVar(value="8.8.8.8")
     check_every_second_var = tk.StringVar(value="600")
+    session_hours_var = tk.StringVar(value="")
     dialog_width_var = tk.StringVar(value="1024")
     dialog_height_var = tk.StringVar(value="500")
     use_ethernet_var = tk.BooleanVar(value=False)
@@ -435,6 +449,13 @@ def add_new_profile():
     check_entry = tk.Entry(check_frame, textvariable=check_every_second_var)
     check_entry.pack(side="left", fill="x", expand=True)
     check_entry.bind("<Button-3>", show_context_menu)
+    # session_hours (optional)
+    session_frame = tk.Frame(container)
+    session_frame.pack(fill="x", pady=5)
+    tk.Label(session_frame, text="session_hours (optional):").pack(side="left")
+    session_entry = tk.Entry(session_frame, textvariable=session_hours_var)
+    session_entry.pack(side="left", fill="x", expand=True)
+    session_entry.bind("<Button-3>", show_context_menu)
     # dialog_geometry width and height
     dialog_geometry_frame = tk.Frame(container)
     dialog_geometry_frame.pack(fill="x", pady=5)
@@ -981,6 +1002,61 @@ def save_to_file(message):
     with open("log.txt", "a", encoding="utf-8") as f:
         f.write(formatted_message)
 
+# Session expiry tracking: many portals end the session a fixed time after login (e.g. 24 hours).
+# If a profile has "session_hours", the time of the last successful login is remembered, and around the
+# expected expiry the connection is checked every few seconds, so the program logs in again right away.
+SESSION_STATE_FILE = "session_state.json"
+SESSION_CHECK_BEFORE_SECONDS = 120  # Start checking quickly this long before the expected expiry
+SESSION_CHECK_AFTER_SECONDS = 600   # Keep checking quickly this long after it (in case the portal's clock differs)
+SESSION_FAST_CHECK_SECONDS = 5
+
+def load_session_state():
+    try:
+        with open(SESSION_STATE_FILE, "r") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+# Remember when the given profile last logged in successfully (survives restarts)
+def save_last_login(profile_name):
+    state = load_session_state()
+    state[profile_name] = datetime.now().isoformat(timespec="seconds")
+    try:
+        with open(SESSION_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except OSError:
+        pass
+
+# Expected expiry of the current profile's session, or None if unknown
+def get_session_expiry():
+    hours = selected_profile.get("session_hours") if selected_profile else None
+    if not hours:
+        return None
+    last_login = load_session_state().get(selected_profile["name"])
+    if not last_login:
+        return None
+    try:
+        return datetime.fromisoformat(last_login) + timedelta(hours=float(hours))
+    except (ValueError, TypeError):
+        return None
+
+# Seconds until the next internet check while connected: the normal interval, shortened so that
+# the check lands right before the expected session expiry, and every few seconds around it.
+# Returns (seconds, expected_expiry or None, checking_quickly)
+def get_check_interval():
+    expiry = get_session_expiry()
+    if expiry is None:
+        return check_every_second, None, False
+    now = datetime.now()
+    window_start = expiry - timedelta(seconds=SESSION_CHECK_BEFORE_SECONDS)
+    window_end = expiry + timedelta(seconds=SESSION_CHECK_AFTER_SECONDS)
+    if window_start <= now <= window_end:
+        return SESSION_FAST_CHECK_SECONDS, expiry, True
+    if now < window_start:
+        return max(1, min(check_every_second, int((window_start - now).total_seconds()) + 1)), expiry, False
+    # Still connected well after the expected expiry, so the session was renewed some other way
+    return check_every_second, None, False
+
 # Create the system tray icon
 def create_system_tray_icon():
     image = Image.open("icon.ico")
@@ -999,8 +1075,9 @@ request_errorcount = 0
 sleepcount = check_every_second
 connected_ssid_lower = None
 last_auto_message = None
+last_session_message = None
 def check_network_status():
-    global running, errorcount, sleepcount, connected_ssid_lower, ssid, response, request_success, request_errorcount, successful_logins_count, last_auto_message, selected_profile
+    global running, errorcount, sleepcount, connected_ssid_lower, ssid, response, request_success, request_errorcount, successful_logins_count, last_auto_message, last_session_message, selected_profile
     # In auto mode the program keeps running (e.g. started with Windows), so it never exits on errors
     while running and (auto_mode or errorcount < 10):
         if auto_mode:
@@ -1064,12 +1141,22 @@ def check_network_status():
                 subprocess.check_output(['netsh', 'wlan', 'disconnect', 'interface=' + "Wi-Fi"], startupinfo=startupinfo).decode("utf-8")
                 time.sleep(5)
             if (is_internet_available()):
-                sleepcount = check_every_second
+                sleepcount, session_expiry, checking_quickly = get_check_interval()
                 request_success = False
                 request_errorcount = 0
-                message = "Connected to {} and internet connection is available. Checking again in {} seconds...".format(connected_ssid, str(sleepcount))
                 errorcount = 0
-                add_to_log(message, "bold_green")
+                if checking_quickly:
+                    # Log once instead of every few seconds, so the log isn't flooded
+                    message = "Connected to {}. The session is expected to expire around {}, checking the connection every {} seconds...".format(connected_ssid, session_expiry.strftime("%H:%M:%S"), str(sleepcount))
+                    if message != last_session_message:
+                        add_to_log(message, "bold_green")
+                        last_session_message = message
+                else:
+                    last_session_message = None
+                    message = "Connected to {} and internet connection is available. Checking again in {} seconds...".format(connected_ssid, str(sleepcount))
+                    if session_expiry:
+                        message += " (Session expires around {})".format(session_expiry.strftime("%Y-%m-%d %H:%M:%S"))
+                    add_to_log(message, "bold_green")
             elif request_success and request_errorcount < 3:
                 # If the request was successful but there is still no internet connection, wait for a few seconds and try again
                 sleepcount = 60
@@ -1092,6 +1179,7 @@ def check_network_status():
                         request_success = True
                         request_errorcount = 0
                         successful_logins_count += 1
+                        save_last_login(selected_profile['name'])
                         message = "Request was successful. Checking the internet connection in {} seconds...".format(str(sleepcount))
                         add_to_log(message, "green")
                         save_to_file(message)

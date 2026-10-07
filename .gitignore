@@ -21,3 +21,7 @@ venv/
 
 # VS Code settings
 .vscode/
+# Runtime files
+main/log.txt
+main/session_state.json
+main/last_known_directory.txt

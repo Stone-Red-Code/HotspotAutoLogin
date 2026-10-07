@@ -66,6 +66,8 @@ HotspotAutoLogin is a script that designed to automate the login process for Wi-
 
 `"check_every_second":` The frequency of the script for checking your internet connection status. For example "100", it will try to check the internet every 100 seconds.
 
+`"session_hours":` *(optional)* If your network logs you out a fixed time after logging in (for example every 24 hours), enter that here, e.g. `24`. The program remembers when it last logged in (in `session_state.json`) and checks the connection every 5 seconds from 2 minutes before the expected expiry until 10 minutes after it, so you are logged back in within seconds instead of waiting for the next `check_every_second` check.
+
 > ## Example useage:
 > 
 
